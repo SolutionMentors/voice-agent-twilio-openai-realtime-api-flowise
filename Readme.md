@@ -15,6 +15,7 @@ This application uses the following Twilio products in conjuction with OpenAI's 
 To use the app, you will  need:
 
 - **Node.js 18+** We used \`18.20.4\` for development; download from [here](https://nodejs.org/).
+- **Flowise instance.** Version 2.2.0 or higher
 - **A Twilio account.** You can sign up for a free trial [here](https://www.twilio.com/try-twilio).
 - **A Twilio number with _Voice_ capabilities.** [Here are instructions](https://help.twilio.com/articles/223135247-How-to-Search-for-and-Buy-a-Twilio-Phone-Number-from-Console) to purchase a phone number.
 - **An OpenAI account and an OpenAI API Key.** You can sign up [here](https://platform.openai.com/).
@@ -26,7 +27,8 @@ There are 4 required steps to get the app up-and-running locally for development
 1. Run ngrok or another tunneling solution to expose your local server to the internet for testing. Download ngrok [here](https://ngrok.com/).
 2. Install the packages
 3. Twilio setup
-4. Update the .env file
+4. Configure Flowise chatflow with tools you want to run during voice interactions
+5. Update the .env file
 
 ### Open an ngrok tunnel
 When developing & testing locally, you'll need to open a tunnel to forward requests to your local development server. These instructions use ngrok.

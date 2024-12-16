@@ -8,7 +8,7 @@ import fastifyWs from '@fastify/websocket';
 dotenv.config();
 
 // Retrieve the OpenAI API key from environment variables.
-const { OPENAI_API_KEY } = process.env;
+const { OPENAI_API_KEY, FLOWISE_BASE_URL, FLOWISE_API_KEY, FLOWISE_CHATFLOW_ID } = process.env;
 
 if (!OPENAI_API_KEY) {
     console.error('Missing OpenAI API key. Please set it in the .env file.');
@@ -21,7 +21,10 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 // Constants
-const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.';
+const SYSTEM_MESSAGE = 'You are AI Agent to represent Solution Mentors that always communicates in English.\n' +
+  'Use the `solutionmentors_qna` tool to find information asked by the user.\n' +
+  'REMEMBER:\n' +
+  '- You cannot answer the questions that are not about Solution Mentors company.';
 const VOICE = 'alloy';
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 
@@ -29,12 +32,14 @@ const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 const LOG_EVENT_TYPES = [
     'error',
     'response.content.done',
+    'response.function_call_arguments.done',
+    'response.output_item.done',
     'rate_limits.updated',
     'response.done',
     'input_audio_buffer.committed',
     'input_audio_buffer.speech_stopped',
     'input_audio_buffer.speech_started',
-    'session.created'
+    'session.created',
 ];
 
 // Show AI response elapsed timing calculations
@@ -50,11 +55,9 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API</Say>
-                              <Pause length="1"/>
-                              <Say>O.K. you can start talking!</Say>
+                              <Say>Connecting your call to the AI voice assistant.</Say>
                               <Connect>
-                                  <Stream url="wss://${request.headers.host}/media-stream" />
+                                  <Stream url="wss://${request.headers.host}/media-stream/${request.body.From}" />
                               </Connect>
                           </Response>`;
 
@@ -63,9 +66,7 @@ fastify.all('/incoming-call', async (request, reply) => {
 
 // WebSocket route for media-stream
 fastify.register(async (fastify) => {
-    fastify.get('/media-stream', { websocket: true }, (connection, req) => {
-        console.log('Client connected');
-
+    fastify.get('/media-stream/:from', { websocket: true },  async (connection, req) => {
         // Connection-specific state
         let streamSid = null;
         let latestMediaTimestamp = 0;
@@ -80,8 +81,54 @@ fastify.register(async (fastify) => {
             }
         });
 
+        const fetchTools = async () => {
+            try {
+                const response = await fetch(`${FLOWISE_BASE_URL}/api/v1/openai-realtime/${FLOWISE_CHATFLOW_ID}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + FLOWISE_API_KEY
+                    }
+                });
+                const rawTools = await response.json();
+
+                return rawTools.map((tool) => {
+                    tool.type = 'function';
+                    return tool;
+                });
+            } catch (e) {
+                console.log('Unable to fetch Flowise tools', e);
+            }
+
+            return [];
+        };
+
+        async function executeFunction(toolName, args) {
+            console.log('FN args', args);
+            const response = await fetch(`${FLOWISE_BASE_URL}/api/v1/openai-realtime/${FLOWISE_CHATFLOW_ID}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + FLOWISE_API_KEY
+                },
+                body: JSON.stringify({
+                    chatId: 'example-session',
+                    toolName: toolName,
+                    inputArgs: args,
+                }),
+            });
+            const result = await response.json();
+            // const toolOutput = result.output;
+            // const sources = result.sourceDocuments;
+            // const artifacts = result.artifacts;
+
+            return result;
+        }
+
         // Control initial session with OpenAI
-        const initializeSession = () => {
+        const initializeSession = async () => {
+            const tools = await fetchTools();
+            console.log('Fetched tools from Flowise', tools);
             const sessionUpdate = {
                 type: 'session.update',
                 session: {
@@ -92,6 +139,7 @@ fastify.register(async (fastify) => {
                     instructions: SYSTEM_MESSAGE,
                     modalities: ["text", "audio"],
                     temperature: 0.8,
+                    tools: tools
                 }
             };
 
@@ -99,11 +147,11 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify(sessionUpdate));
 
             // Uncomment the following line to have AI speak first:
-            // sendInitialConversationItem();
+            sendConversationItem('Greet the user with "Hello there. I am the Solution Mentors AI assistant. If you have any questions or would like to schedule a meeting with our representative, I’m here to help."');
         };
 
         // Send initial conversation item if AI talks first
-        const sendInitialConversationItem = () => {
+        const sendConversationItem = (text) => {
             const initialConversationItem = {
                 type: 'conversation.item.create',
                 item: {
@@ -112,7 +160,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Greet the user with "Hello there! I am an AI voice assistant powered by Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or anything you can imagine. How can I help you?"'
+                            text: text
                         }
                     ]
                 }
@@ -180,6 +228,22 @@ fastify.register(async (fastify) => {
                     console.log(`Received event: ${response.type}`, response);
                 }
 
+                if (response.type === 'response.function_call_arguments.done') {
+                    console.log(`Executing function: ${response.name}`, response.arguments);
+
+                    try {
+                        executeFunction(response.name, response.arguments).then((response) => {
+                            console.log('Function response: ', response);
+
+                            const result = response.output;
+                            sendConversationItem(result);
+                        });
+                    } catch (e) {
+                        sendConversationItem('Respond to user that you cannot fulfil this request.');
+                        console.log('Function call error: ', e);
+                    }
+                }
+
                 if (response.type === 'response.audio.delta' && response.delta) {
                     const audioDelta = {
                         event: 'media',
@@ -197,7 +261,7 @@ fastify.register(async (fastify) => {
                     if (response.item_id) {
                         lastAssistantItem = response.item_id;
                     }
-                    
+
                     sendMark(connection, streamSid);
                 }
 
@@ -231,7 +295,7 @@ fastify.register(async (fastify) => {
                         console.log('Incoming stream has started', streamSid);
 
                         // Reset start and media timestamp on a new stream
-                        responseStartTimestampTwilio = null; 
+                        responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
                         break;
                     case 'mark':
